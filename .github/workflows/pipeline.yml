@@ -1,0 +1,45 @@
+name: Fabrica de kits Airbnb
+
+on:
+  schedule:
+    # Todos los lunes a las 12:00 UTC (~9:00 hs Argentina)
+    - cron: "0 12 * * 1"
+  workflow_dispatch: {}  # permite correrlo manualmente desde GitHub si hace falta
+
+jobs:
+  generar-y-publicar:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Descargar el repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Instalar dependencias
+        run: |
+          pip install groq google-generativeai reportlab requests
+
+      - name: Generar contenido con IA
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: python scripts/generar_contenido.py
+
+      - name: Armar PDF y ZIP
+        run: python scripts/armar_pdf.py
+
+      - name: Subir producto a Gumroad
+        env:
+          GUMROAD_ACCESS_TOKEN: ${{ secrets.GUMROAD_ACCESS_TOKEN }}
+        run: python scripts/subir_gumroad.py
+
+      - name: Guardar cambios en el repositorio
+        run: |
+          git config user.name "fabrica-bot"
+          git config user.email "bot@fabrica.local"
+          git add catalogo.json anuncios_pendientes.txt
+          git commit -m "Nuevo kit generado automaticamente" || echo "Sin cambios para commitear"
+          git push
