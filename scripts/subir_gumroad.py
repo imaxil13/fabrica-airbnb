@@ -3,14 +3,24 @@ Sube el kit generado (ZIP + metadatos) a Gumroad como producto nuevo,
 usando la Gumroad API. También actualiza catalogo.json para que la
 próxima corrida no repita la misma combinación país+situación.
 
-Gumroad ya no acepta el archivo directo en POST /v2/products. El flujo
-correcto es:
+Flujo completo confirmado contra la documentacion oficial de Gumroad:
   1. POST /files/presign      -> devuelve upload_id, key, y las partes
                                   con sus presigned_url
   2. PUT a cada presigned_url -> subir cada bloque de bytes a S3,
                                   guardando el ETag de cada respuesta
   3. POST /files/complete     -> devuelve la file_url final
-  4. POST /v2/products        -> se crea el producto usando files[][url]
+  4. POST /v2/products        -> crea el producto (datos basicos, precio,
+                                  descripcion). Queda como borrador.
+  5. PUT /v2/products/:id     -> paso separado e imprescindible: asocia
+                                  el archivo al "Content" descargable del
+                                  producto usando files[][url]. Sin este
+                                  paso, el archivo queda solo como un
+                                  adjunto de metadatos y el comprador NO
+                                  recibe nada al pagar.
+
+El producto queda "Unpublished" (borrador) a propósito: es el punto de
+revisión de 30 segundos antes de que un comprador real pague por un
+documento generado por IA.
 """
 
 import os
@@ -136,14 +146,11 @@ def subir_archivo_a_gumroad(zip_path, token):
     return file_url
 
 
-def crear_producto_en_gumroad(kit, zip_path, token):
+def crear_producto_en_gumroad(kit, token):
+    """Paso 4: crea el producto con los datos básicos. Todavía sin archivo
+    asociado al Content — eso lo hace adjuntar_archivo_al_contenido()."""
     precio_centavos = int(float(kit["precio_sugerido"])) * 100
 
-    file_url = subir_archivo_a_gumroad(zip_path, token)
-
-    # files[][url] va como lista de tuplas, igual que parts[][...] en
-    # completar_subida(): con un dict normal, requests no arma el array
-    # que espera la API y el archivo queda sin asociarse al producto.
     campos = [
         ("access_token", token),
         ("name", kit["titulo_venta"]),
@@ -151,7 +158,6 @@ def crear_producto_en_gumroad(kit, zip_path, token):
         ("price", precio_centavos),
         ("customizable_price", "false"),
         ("shown_on_profile", "true"),
-        ("files[][url]", file_url),
     ]
 
     respuesta = requests.post(
@@ -159,7 +165,25 @@ def crear_producto_en_gumroad(kit, zip_path, token):
         data=campos,
         timeout=60,
     )
+    respuesta.raise_for_status()
+    return respuesta.json()
 
+
+def adjuntar_archivo_al_contenido(product_id, file_url, token):
+    """Paso 5: actualiza el producto ya creado para asociar el archivo al
+    Content descargable. Esta es la llamada que faltaba: sin ella, el
+    archivo puede quedar registrado en Gumroad pero no aparece en la
+    pestaña Content ni se entrega al comprador."""
+    campos = [
+        ("access_token", token),
+        ("files[][url]", file_url),
+    ]
+
+    respuesta = requests.put(
+        f"{GUMROAD_API_BASE}/products/{product_id}",
+        data=campos,
+        timeout=60,
+    )
     respuesta.raise_for_status()
     return respuesta.json()
 
@@ -173,14 +197,30 @@ def main():
     nombre_base = f"{kit['pais']}_{kit['situacion']}".replace(" ", "_").lower()
     zip_path = os.path.join(OUTPUT_DIR, f"{nombre_base}.zip")
 
-    print(f"Subiendo a Gumroad: {kit['titulo_venta']} (${kit['precio_sugerido']})")
-    resultado = crear_producto_en_gumroad(kit, zip_path, token)
+    print(f"Subiendo archivo a Gumroad (presign -> S3 -> complete)...")
+    file_url = subir_archivo_a_gumroad(zip_path, token)
+    print(f"Archivo disponible en: {file_url}")
+
+    print(f"Creando producto: {kit['titulo_venta']} (${kit['precio_sugerido']})")
+    resultado = crear_producto_en_gumroad(kit, token)
 
     if not resultado.get("success"):
-        raise RuntimeError(f"Gumroad rechazó la subida: {resultado}")
+        raise RuntimeError(f"Gumroad rechazó la creación del producto: {resultado}")
 
     producto = resultado["product"]
-    print(f"Publicado: {producto.get('short_url')}")
+    product_id = producto["id"]
+    print(f"Producto creado (borrador): {producto.get('short_url')}")
+
+    print("Asociando el archivo al Content descargable...")
+    resultado_update = adjuntar_archivo_al_contenido(product_id, file_url, token)
+
+    if not resultado_update.get("success"):
+        raise RuntimeError(
+            f"El producto se creó pero el archivo no se pudo asociar al "
+            f"Content: {resultado_update}"
+        )
+
+    print("Archivo asociado correctamente al Content del producto.")
 
     catalogo = cargar_catalogo()
     catalogo["productos"].append({
@@ -201,6 +241,11 @@ def main():
         f.write(texto_anuncio + "\n\n---\n\n")
 
     print("Catálogo actualizado y anuncio agregado a anuncios_pendientes.txt")
+    print(
+        "\nRECORDATORIO: el producto quedó en 'Unpublished'. Entrá a Gumroad, "
+        "date un vistazo rápido al PDF en la pestaña Content, y publicá "
+        "manualmente cuando estés conforme."
+    )
 
 
 if __name__ == "__main__":
