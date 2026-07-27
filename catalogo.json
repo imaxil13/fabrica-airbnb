@@ -1,3 +1,11 @@
 {
-  "productos": []
+  "productos": [
+    {
+      "pais": "Argentina",
+      "situacion": "huésped que cancela de último momento",
+      "titulo": "Kit de Cancelación de Último Momento para Anfitriones",
+      "precio": "29",
+      "url": "https://kayakmaster5.gumroad.com/l/uwyph"
+    }
+  ]
 }
